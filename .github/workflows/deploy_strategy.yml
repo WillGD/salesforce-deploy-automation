@@ -1,0 +1,44 @@
+name: Deploy Strategy
+on:
+  pull_request:
+    branches:
+      - master   
+    types:
+      - opened   # O workflow será disparado ao abrir o PR
+
+jobs:
+  set-deploy-type:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Definir tipo de deploy com base no input do PR
+        run: |
+          echo "Escolha o tipo de deploy (delta ou full):"
+          echo "1. Para delta, defina como 'delta'."
+          echo "2. Para full, defina como 'full'."
+          
+          # Adicionando a variável para o tipo de deploy
+          echo "deploy_type=${{ github.event.pull_request.title }}" >> $GITHUB_ENV
+          
+  deploy:
+    runs-on: ubuntu-latest
+    needs: set-deploy-type
+    steps:
+      - name: Exibir tipo de deploy escolhido
+        run: |
+          echo "O tipo de deploy escolhido foi: ${{ env.deploy_type }}"
+      
+      - name: Executar Deploy com base no tipo de deploy
+        run: |
+          if [ "${{ env.deploy_type }}" == "delta" ]; then
+            echo "Tipo de Deploy: Delta"
+            # Comando para deploy delta
+            sf project deploy start --manifest deploy/package/package.xml --dry-run --test-level RunAllTestsInOrg --target-org prd > deploy/deploy_output.log || true
+          else
+            echo "Tipo de Deploy: Full"
+            # Comando para deploy full (subindo o force-app inteiro)
+            sf project deploy start --source-dir force-app --dry-run --test-level RunAllTestsInOrg --target-org prd > deploy/deploy_output.log || true
+
+      - name: Exibir o Log de Deploy diretamente no console
+        run: |
+          echo "Log de Deploy - Erros e Detalhes"
+          cat deploy/deploy_output.log
