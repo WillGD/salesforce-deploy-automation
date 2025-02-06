@@ -53,7 +53,7 @@ jobs:
         run: echo "Tipo de deploy definido: ${{ env.deploy_type }}"
 
       - name: Gerar pacote delta no diretório deploy (somente se for delta)
-        if: env.deploy_type == 'delta'
+        if: ${{ env.deploy_type == 'delta' }}
         run: |
           sf sgd source delta --from HEAD^ --to HEAD --output-dir deploy
 
@@ -70,7 +70,7 @@ jobs:
         run: ls -R deploy || echo "Diretório deploy está vazio"
 
       - name: Exibir conteúdo do package.xml (somente se for delta)
-        if: env.deploy_type == 'delta'
+        if: ${{ env.deploy_type == 'delta' }}
         run: cat deploy/package/package.xml || echo "Nenhum package.xml encontrado"
 
       - name: Executar Deploy Strategy
@@ -83,7 +83,7 @@ jobs:
             sf project deploy start --source-dir force-app --test-level RunAllTestsInOrg --target-org prd > deploy/deploy_output.log || true
 
       - name: Salvar package.xml (somente se for delta)
-        if: env.deploy_type == 'delta'
+        if: ${{ env.deploy_type == 'delta' }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.set-artifact-name.outputs.PACKAGE_XML_ARTIFACT }}
