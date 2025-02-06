@@ -50,7 +50,8 @@ jobs:
           fi
 
       - name: Exibir tipo de deploy definido
-        run: echo "Tipo de deploy definido: ${{ env.deploy_type }}"
+        run: |
+          echo "Tipo de deploy definido: ${{ env.deploy_type }}"
 
       - name: Gerar pacote delta no diretório deploy (somente se for delta)
         if: ${{ env.deploy_type == 'delta' }}
