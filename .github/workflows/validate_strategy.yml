@@ -60,9 +60,16 @@ jobs:
       # Definir tipo de deploy com base no título do PR
       - name: Definir tipo de deploy
         run: |
-          echo "O tipo de deploy será baseado no título do PR"
           PR_TITLE="${{ github.event.pull_request.title }}"
-          echo "Tipo de deploy: $PR_TITLE" >> $GITHUB_ENV
+          echo "Título do PR: $PR_TITLE"
+          
+          if [[ "$PR_TITLE" == *"delta"* ]]; then
+            echo "deploy_type=delta" >> $GITHUB_ENV
+          elif [[ "$PR_TITLE" == *"full"* ]]; then
+            echo "deploy_type=full" >> $GITHUB_ENV
+          else
+            echo "deploy_type=full" >> $GITHUB_ENV  # Default para full se não encontrar delta ou full no título
+          fi
           
       # Executar o workflow de Deploy Strategy
       - name: Executar Deploy Strategy

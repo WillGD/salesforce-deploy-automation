@@ -15,7 +15,7 @@ jobs:
       - name: Checkout do repositório
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 
+          fetch-depth: 0
 
       - name: Instalar dependências do sistema e do Salesforce CLI
         run: |
@@ -41,10 +41,13 @@ jobs:
           PR_TITLE="${{ github.event.pull_request.title }}"
           echo "Título do PR: $PR_TITLE"
           
-          if [[ "$PR_TITLE" =~ "[full]" ]]; then
+          if [[ "$PR_TITLE" == *"delta"* ]]; then
+            echo "deploy_type=delta" >> $GITHUB_ENV
+          elif [[ "$PR_TITLE" == *"full"* ]]; then
             echo "deploy_type=full" >> $GITHUB_ENV
           else
-            echo "deploy_type=delta" >> $GITHUB_ENV
+            echo "deploy_type=full" >> $GITHUB_ENV  # Default para full se não encontrar delta ou full no título
+          fi
 
       - name: Exibir tipo de deploy definido
         run: echo "Tipo de deploy definido: ${{ env.deploy_type }}"
@@ -65,11 +68,11 @@ jobs:
 
       - name: Listar conteúdo do diretório deploy
         run: ls -R deploy || echo "Diretório deploy está vazio"
-      
+
       - name: Exibir conteúdo do package.xml (somente se for delta)
         if: env.deploy_type == 'delta'
         run: cat deploy/package/package.xml || echo "Nenhum package.xml encontrado"
-      
+
       - name: Executar Deploy Strategy
         run: |
           if [ "${{ env.deploy_type }}" == "delta" ]; then
