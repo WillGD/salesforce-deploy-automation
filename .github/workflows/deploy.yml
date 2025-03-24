@@ -6,7 +6,6 @@ on:
       - master
     paths:
       - 'force-app/**'
-
 jobs:
   merge_deploy:
     if: github.event.pull_request.merged == true
@@ -15,7 +14,7 @@ jobs:
       - name: Checkout do repositório
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0 
 
       - name: Instalar dependências do sistema e do Salesforce CLI
         run: |
@@ -34,27 +33,7 @@ jobs:
       - name: Criar diretório de saída para o pacote delta
         run: mkdir -p deploy
 
-      # Definir tipo de deploy com base no título do PR
-      - name: Definir tipo de deploy
-        id: define-deploy-type
-        run: |
-          PR_TITLE="${{ github.event.pull_request.title }}"
-          echo "Título do PR: $PR_TITLE"
-          
-          if [[ "$PR_TITLE" == *"delta"* ]]; then
-            echo "deploy_type=delta" >> $GITHUB_ENV
-          elif [[ "$PR_TITLE" == *"full"* ]]; then
-            echo "deploy_type=full" >> $GITHUB_ENV
-          else
-            echo "deploy_type=full" >> $GITHUB_ENV  # Default para full se não encontrar delta ou full no título
-          fi
-
-      - name: Exibir tipo de deploy definido
-        run: |
-          echo "Tipo de deploy definido: ${{ env.deploy_type }}"
-
-      - name: Gerar pacote delta no diretório deploy (somente se for delta)
-        if: ${{ env.deploy_type == 'delta' }}
+      - name: Gerar pacote delta no diretório deploy
         run: |
           sf sgd source delta --from HEAD^ --to HEAD --output-dir deploy
 
@@ -68,23 +47,72 @@ jobs:
           echo "DEPLOY_LOG_ARTIFACT=${ORG_NAME}_Deploy_log_${TIMESTAMP}" >> $GITHUB_OUTPUT
 
       - name: Listar conteúdo do diretório deploy
-        run: ls -R deploy || echo "Diretório deploy está vazio"
+        run: ls -R deploy
+        
+      - name: Exibir conteúdo do package.xml
+        run: cat deploy/package/package.xml
+        
 
-      - name: Exibir conteúdo do package.xml (somente se for delta)
-        if: ${{ env.deploy_type == 'delta' }}
-        run: cat deploy/package/package.xml || echo "Nenhum package.xml encontrado"
+      - name: Converter metadados para deploy
+        run: sfdx force:source:convert --manifest=deploy/package/package.xml --outputdir=convert
 
-      - name: Executar Deploy Strategy
+      - name: Verificar se há classes Apex
+        id: check-apex
+        run: echo "HAS_APEX=$(grep -q '<name>ApexClass</name>' deploy/package/package.xml && echo true || echo false)" >> $GITHUB_ENV
+
+      # **Executar o deploy real diretamente**
+      - name: Executar Deploy
         run: |
-          if [ "${{ env.deploy_type }}" == "delta" ]; then
-            echo "Tipo de Deploy: Delta"
-            sf project deploy start --manifest deploy/package/package.xml --test-level RunAllTestsInOrg --target-org prd > deploy/deploy_output.log || true
-          else
-            echo "Tipo de Deploy: Full"
-            sf project deploy start --source-dir force-app --test-level RunAllTestsInOrg --target-org prd > deploy/deploy_output.log || true
+          set -e  # Para garantir que qualquer erro interrompa o workflow
+          if [ "${{ env.HAS_APEX }}" == "true" ]; then
+            echo "🚀 Executando deploy com testes específicos."
+            sf project deploy start --manifest deploy/package/package.xml --test-level RunSpecifiedTests --tests UtilTest --tests ConciergeControllerTest --tests ConciergeServiceTest  --tests ConciergeControllerTest --tests ConciergeServiceTest --tests AccountControllerTest --tests AccountDATest --tests AccountHelperTest --tests ChecklistDATest --tests ChecklistHelperTest --tests ChecklistControllerTest --tests ChecklistTrigggerHandlerTest --tests ContractSelectorTest --tests ContractControllerTest --tests ContratoServiceTest --tests ContractDATest --tests ContractHelperTest --tests ContractTriggerHandlerTest --tests DocumentacaoDATest --tests DocumentControllerTest --tests DocumentacaoHelperTest --tests QuoteDATest --tests QuoteHelper --tests QuoteHelperTest --tests QueryHelperTest --tests QuoteLineItemHelper --tests QuoteLineItemHelperTest --tests QuoteLineItemTriggerHandler --tests QuoteLineItemTriggerHandlerTest --tests QuoteSyncHelper --tests QuoteSyncHelperTest --tests SalesTeamControllerTest --tests QuoteSyncTriggerHandler --tests QuoteSyncTriggerHandlerTest --tests QuoteTriggerHandler --tests QuoteTriggerHandlerTest --tests AccountContactRelationHelperTest --tests AnaliseCreditoHelperTest --tests AnaliseCreditoTriggerHandlerTest --tests TriggerHandler_Test --tests EmailManagerTest --tests ObjectHelperTest --tests ObjectControllerTest --tests OpportunityHelperTest --tests OpportunityTriggerHandlerTest --tests GerarContratoControllerTest --tests OpportunityDATest --tests IntegrationD4SignTest --tests AnaliseCreditoDATest --tests TemplateDocumentoHelperTest --tests UtilTest --tests TemplateDocumentoTriggerHandlerTest --tests TemplateDocumentoDATest --tests TemplateDocumentoControllerTest --tests TemplateDocumentoDATest --tests EmpreendimentoSelectorTest --tests ComparativoControllerTest --tests ComparativoServiceTest --tests EspelhoVendasControllerTest --tests comissaoControllerTest --tests CotacaoControllerTest --tests EspelhoVendasServiceTest --tests ExtratoTabelaServiceTest --tests ProdutoSelectorTest --tests SeriePagamentoSelectorTest --tests SeriePagamentosServiceTest --tests SimuladorVendasControllerTest --tests SeriePagamentosTriggerHandlerTest --tests SimuladorTelaNegociacaoControllerTest --tests TabelaVendaHandlerTest --tests TabelaVendaSelectorTest --tests TabelaVendasServiceTest --tests TestDataFactoryTest --tests TestDataFactorySimuladorTest --tests UnidadeTabelaSelectorTest --tests UnidadeTabelaServiceTest --tests ParametrizarCriterioServiceTest --tests ParametrizarCriterioControllerTest --target-org prd | tee deploy/deploy_output.log
+            else
+            echo "Executando deploy sem testes."
+            sf project deploy start --manifest deploy/package/package.xml --test-level NoTestRun --target-org prd | tee deploy/deploy_output.log
+            fi
 
-      - name: Salvar package.xml (somente se for delta)
-        if: ${{ env.deploy_type == 'delta' }}
+           # Verificar falhas no deploy
+      - name: Verificar falhas no deploy
+        run: |
+          # Verifica falhas em componentes
+          if grep -qi "Component Failures" deploy/deploy_output.log; then
+            echo "❌ Falhas de componente detectadas! O deploy falhou."
+            cat deploy/deploy_output.log
+            exit 1
+          fi
+
+          # Verifica falhas em testes
+          if grep -qi "Assertion Failed" deploy/deploy_output.log; then
+            echo "❌ Falhas nos testes detectadas!"
+            cat deploy/deploy_output.log
+            exit 1
+          fi
+
+          # Verifica falhas em testes
+          if grep -qi "System.DmlException: Insert failed" deploy/deploy_output.log; then
+            echo "❌ Falhas nos testes detectadas!"
+            cat deploy/deploy_output.log
+            exit 1
+          fi
+
+          # Verifica cobertura de código insuficiente
+          if grep -qi "São necessários pelo menos 75% de cobertura do teste" deploy/deploy_output.log; then
+            echo "❌ Cobertura de código insuficiente detectada!"
+            cat deploy/deploy_output.log
+            exit 1
+          fi
+
+          # Verificar se houve falhas durante a execução do dry-run
+          if grep -qi "Failed to run" deploy/deploy_output.log; then
+            echo "❌ O dry-run falhou!"
+            cat deploy/deploy_output.log
+            exit 1
+          fi
+
+          echo "✅ Deploy validado com sucesso! Nenhuma falha encontrada."
+
+      - name: Salvar package.xml
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.set-artifact-name.outputs.PACKAGE_XML_ARTIFACT }}
