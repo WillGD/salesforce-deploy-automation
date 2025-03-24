@@ -1,5 +1,4 @@
-name: Rollback de validar alterações para GalmoBox
-
+name: Rollback de validar destructiveChanges
 on:
   workflow_dispatch:  # Gatilho manual
 
