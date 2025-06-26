@@ -1,0 +1,90 @@
+name: Deploy das alterações para PRD
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - master
+    paths:
+      - 'force-app/**'
+      - 'vlocity/**'
+
+jobs:
+  merge_deploy:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 
+
+      - name: Instalar dependências do sistema, Salesforce CLI e Vlocity CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget curl jq
+          npm install @salesforce/cli --global
+          npm install -g vlocity
+
+      - name: Autenticar com a org PRD
+        run: |
+          echo "${{ secrets.AUTH_URL_PRD }}" > sfdx-auth-url.txt
+          sf org login sfdx-url -f sfdx-auth-url.txt --alias prd
+
+      - name: Instalar plugin sfdx-git-delta
+        run: echo "y" | sf plugins install sfdx-git-delta
+
+      - name: Criar diretório de saída para o pacote delta
+        run: mkdir -p deploy
+
+      - name: Gerar pacote delta no diretório deploy
+        run: |
+          sf sgd source delta --from HEAD^ --to HEAD --output-dir deploy
+
+      - name: Definir nome do artefato com org, data e hora
+        id: set-artifact-name
+        run: |
+          ORG_NAME="PRD"
+          export TZ="America/Sao_Paulo"
+          TIMESTAMP=$(date +'%d-%m-%Y--%H-%M-%S')
+          echo "PACKAGE_XML_ARTIFACT=${ORG_NAME}_Package_xml_${TIMESTAMP}" >> $GITHUB_OUTPUT
+          echo "DEPLOY_SFCLI_LOG_ARTIFACT=${ORG_NAME}_Deploy_SFCLI_log_${TIMESTAMP}" >> $GITHUB_OUTPUT
+          echo "DEPLOY_VLOCITY_LOG_ARTIFACT=${ORG_NAME}_Deploy_Vlocity_log_${TIMESTAMP}" >> $GITHUB_OUTPUT
+
+      - name: Listar conteúdo do diretório deploy
+        run: ls -R deploy
+        
+      - name: Exibir conteúdo do package.xml
+        run: cat deploy/package/package.xml
+        
+      - name: Converter metadados para deploy
+        run: sfdx force:source:convert --manifest=deploy/package/package.xml --outputdir=convert
+
+      - name: Executar deploy real com Salesforce CLI e testes
+        run: |
+          set -e
+          echo "🚀 Deploy Salesforce CLI com testes rodando full power"
+          sf project deploy start --manifest deploy/package/package.xml --test-level RunLocalTests --target-org prd | tee deploy/deploy_sfcli.log
+
+      - name: Executar deploy real com Vlocity CLI
+        run: |
+          set -e
+          echo "🚀 Deploy Vlocity CLI rodando full power"
+          vlocity -job vlocity/job.json packDeploy | tee deploy/deploy_vlocity.log
+
+      - name: Salvar package.xml
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.set-artifact-name.outputs.PACKAGE_XML_ARTIFACT }}
+          path: deploy/package/package.xml
+
+      - name: Salvar logs do deploy Salesforce CLI
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.set-artifact-name.outputs.DEPLOY_SFCLI_LOG_ARTIFACT }}
+          path: deploy/deploy_sfcli.log
+
+      - name: Salvar logs do deploy Vlocity CLI
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.set-artifact-name.outputs.DEPLOY_VLOCITY_LOG_ARTIFACT }}
+          path: deploy/deploy_vlocity.log
