@@ -1,0 +1,117 @@
+name: Validate Pull Request - PRD
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - 'force-app/**'
+      - 'vlocity/**'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verificar se o evento foi cancelado
+        if: github.event.action == 'closed' && github.event.pull_request.merged == false
+        run: |
+          echo "O Pull Request foi cancelado. Saindo com erro."
+          exit 1
+
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  
+
+      - name: Instalar dependências do sistema e do Salesforce CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget curl jq
+          npm install @salesforce/cli --global
+
+      - name: Instalar Vlocity CLI
+        run: npm install -g vlocity
+
+      - name: Autenticar com a org PRD
+        run: |
+          echo "${{ secrets.AUTH_URL_PRD }}" > sfdx-auth-url.txt
+          sf org login sfdx-url -f sfdx-auth-url.txt --alias prd
+
+      - name: Valida se branch está atualizada
+        run: |        
+          TARGET_BRANCHES=("origin/develop" "origin/main")
+          for branch in "${TARGET_BRANCHES[@]}"; do
+            if ! git merge-base --is-ancestor $branch HEAD; then
+              echo "@@@ Erro: sua branch não está atualizada com $branch. Atualize-a antes de realizar o PR e ou merge."
+              exit 1
+            fi
+          done
+
+      - name: Instalar plugin sfdx-git-delta
+        run: echo "y" | sf plugins install sfdx-git-delta
+
+      - name: Criar diretório de saída para o pacote delta
+        run: mkdir -p deploy
+
+      - name: Gerar pacote delta no diretório deploy
+        run: |
+          sf sgd source delta --from origin/master --to HEAD --output-dir deploy
+
+      - name: Rodar análise completa do código
+        id: run-code-analyzer
+        uses: forcedotcom/run-code-analyzer@v1
+        with:
+          run-command: run
+          run-arguments: --normalize-severity --severity-threshold 1 --category "Best Practices,Code Style,Design,Security,Error Prone,Performance" --target "./deploy" --outfile SalesforceCodeAnalyzerResults.json
+          results-artifact-name: salesforce-code-analyzer-results
+
+      - name: Validar resultado da análise de código
+        if: |
+          steps.run-code-analyzer.outputs.exit-code > 0 ||
+          steps.run-code-analyzer.outputs.num-sev1-violations > 0 
+        run:  | 
+          echo "------------------------------------"
+          echo "------PMD CODE ANALYSIS FAILED------"
+          echo "------------------------------------"
+          exit 1
+
+      - name: Listar conteúdo do diretório deploy
+        run: ls -R deploy
+
+      - name: Exibir conteúdo do package.xml
+        run: cat deploy/package/package.xml
+
+      - name: Convertendo Metadados do package
+        run: |
+          sfdx force:source:convert --manifest=deploy/package/package.xml --outputdir=convert
+
+      - name: Rodar deploy dry-run do Vlocity para validar deploy real
+        run: |
+          set -e
+          vlocity -job vlocity/job.json packDeploy --dry-run || (echo "Erro no dry-run do Vlocity packDeploy" && exit 1)
+
+      - name: Executar Deploy e Testes Salesforce (dry-run)
+        run: |
+          set -e
+          echo "Executando deploy Salesforce com dry-run."
+          sf project deploy start --manifest deploy/package/package.xml --dry-run --test-level RunLocalTests --target-org prd | tee deploy/deploy_output.log
+
+      - name: Definir nome do artefato com org, data e hora
+        id: set-artifact-name
+        run: |
+          ORG_NAME="PRD"
+          export TZ="America/Sao_Paulo"
+          TIMESTAMP=$(date +'%d-%m-%Y--%H-%M-%S')
+          echo "PACKAGE_XML_ARTIFACT=${ORG_NAME}_Package_xml_${TIMESTAMP}" >> $GITHUB_OUTPUT
+          echo "DEPLOY_LOG_ARTIFACT=${ORG_NAME}_Validade_log_${TIMESTAMP}" >> $GITHUB_OUTPUT
+
+      - name: Salvar package.xml
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.set-artifact-name.outputs.PACKAGE_XML_ARTIFACT }}
+          path: deploy/package/package.xml
+
+      - name: Salvar o Log de Deploy
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.set-artifact-name.outputs.DEPLOY_LOG_ARTIFACT }}
+          path: deploy/deploy_output.log
