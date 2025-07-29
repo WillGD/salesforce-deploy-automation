@@ -1,117 +1,167 @@
-name: Validate Pull Request - PRD
+name: Campana - Validate pull request
+
 on:
   pull_request:
-    branches:
-      - master
-    paths:
-      - 'force-app/**'
-      - 'vlocity/**'
+    branches: [ dev, qa, uat, staging, hotfix, main ]
+    types: [ labeled ]
+
+env:
+  SF_DISABLE_DNS_CHECK: true
+  SF_DISABLE_SOURCE_MEMBER_POLLING: true
+  SF_DNS_TIMEOUT: 120
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
   validate:
+    name: Run tests
     runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    if: |
+      github.actor != 'dependabot[bot]' &&
+      (github.event.label.name == 'RUN_TESTS' || github.event.label.name == 'NOT_RUN_TESTS')
+    env:
+      BRANCH_REF: ${{ github.base_ref }}
+      GITHUB_EVENT_LABEL_NAME: ${{ github.event.label.name }}
     steps:
-      - name: Verificar se o evento foi cancelado
-        if: github.event.action == 'closed' && github.event.pull_request.merged == false
-        run: |
-          echo "O Pull Request foi cancelado. Saindo com erro."
-          exit 1
-
-      - name: Checkout do repositório
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
 
-      - name: Instalar dependências do sistema e do Salesforce CLI
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y wget curl jq
-          npm install @salesforce/cli --global
+      - name: Setup nodeJS
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          check-latest: true
 
-      - name: Instalar Vlocity CLI
+      - name: Install SFDX CLI
+        run: npm install @salesforce/cli -g
+
+      - name: Install the SFDX Git Delta
+        run: echo 'y' | sf plugins install sfdx-git-delta
+
+      - name: Install Vlocity Build Tool
         run: npm install -g vlocity
 
-      - name: Autenticar com a org PRD
+      - name: Set ENV Auth URL Org
+        id: set-env-org
         run: |
-          echo "${{ secrets.AUTH_URL_PRD }}" > sfdx-auth-url.txt
-          sf org login sfdx-url -f sfdx-auth-url.txt --alias prd
+          declare -A URL_MAP=(
+            [dev]="${{ secrets.DEV_AUTH_URL }}"
+            [qa]="${{ secrets.QA_AUTH_URL }}"
+            [uat]="${{ secrets.UAT_AUTH_URL }}"
+            [staging]="${{ secrets.STAGING_AUTH_URL }}"
+            [hotfix]="${{ secrets.HOTFIX_AUTH_URL }}"
+            [main]="${{ secrets.PROD_AUTH_URL }}"
+          )
+          echo "env=${URL_MAP[$BRANCH_REF]:-unknown}" >> $GITHUB_OUTPUT
 
-      - name: Valida se branch está atualizada
-        run: |        
-          TARGET_BRANCHES=("origin/develop" "origin/main")
-          for branch in "${TARGET_BRANCHES[@]}"; do
-            if ! git merge-base --is-ancestor $branch HEAD; then
-              echo "@@@ Erro: sua branch não está atualizada com $branch. Atualize-a antes de realizar o PR e ou merge."
-              exit 1
-            fi
+      - name: Set ENV Auth User Org
+        id: set-env-user
+        run: |
+          declare -A USER_MAP=(
+            [dev]="${{ secrets.DEV_AUTH_USER }}"
+            [qa]="${{ secrets.QA_AUTH_USER }}"
+            [uat]="${{ secrets.UAT_AUTH_USER }}"
+            [staging]="${{ secrets.STAGING_AUTH_USER }}"
+            [hotfix]="${{ secrets.HOTFIX_AUTH_USER }}"
+            [main]="${{ secrets.PROD_AUTH_USER }}"
+          )
+          echo "env=${USER_MAP[$BRANCH_REF]:-unknown}" >> $GITHUB_OUTPUT
+
+      - name: Authenticate Org
+        run: |
+          echo ${{ steps.set-env-org.outputs.env }} > ./AUTH_URL.txt
+          echo y | sf org login sfdx-url -f ./AUTH_URL.txt -a salesforceOrg -d
+          sf config set target-org=${{ steps.set-env-user.outputs.env }}
+          sf config set org-api-version=63.0 --global
+
+      - name: Generate package.xml
+        run: |
+          echo "Destination Branch: $BRANCH_REF"
+          echo n | sf sgd:source:delta --to "HEAD" --from $(git merge-base HEAD origin/$BRANCH_REF) --output . -i .ciignore
+          echo "--- package.xml generated with added and modified metadata ---"
+          cat package/package.xml
+          echo "--- destructiveChanges.xml generated with deleted metadata ---"
+          cat destructiveChanges/destructiveChanges.xml
+
+      - name: Check package
+        id: check_package
+        run: |
+          if grep -q '<types>' ./package/package.xml; then
+            echo "run_job=true" >> $GITHUB_OUTPUT
+          else
+            echo "run_job=false" >> $GITHUB_OUTPUT
+          fi
+          echo "check_labels=false" >> $GITHUB_OUTPUT
+
+      - name: Generate Vlocity Delta
+        run: |
+          mkdir -p vlocity
+          git diff --name-only $(git merge-base HEAD origin/${{ github.base_ref }}) HEAD | grep '^vlocity/' > vlocity/changedFiles.txt || true
+
+          echo "projectPath: ." > vlocity/manifest.yaml
+          echo "expansionPath: vlocity" >> vlocity/manifest.yaml
+          echo "manifest:" >> vlocity/manifest.yaml
+
+          cut -d'/' -f2-3 vlocity/changedFiles.txt | sed 's/\.json$//' | sort -u | while read -r pack; do
+            echo "  - $pack" >> vlocity/manifest.yaml
           done
 
-      - name: Instalar plugin sfdx-git-delta
-        run: echo "y" | sf plugins install sfdx-git-delta
+          echo "📝 Manifesto manifest.yaml criado com:"
+          cat vlocity/manifest.yaml
 
-      - name: Criar diretório de saída para o pacote delta
-        run: mkdir -p deploy
 
-      - name: Gerar pacote delta no diretório deploy
+      - name: Check Vlocity changes
+        id: check_vlocity
         run: |
-          sf sgd source delta --from origin/master --to HEAD --output-dir deploy
+          if git diff --name-only $(git merge-base HEAD origin/${{ github.base_ref }}) HEAD | grep -q '^vlocity/'; then
+            echo "run_vlocity=true" >> $GITHUB_OUTPUT
+          else
+            echo "run_vlocity=false" >> $GITHUB_OUTPUT
+          fi
 
-      - name: Rodar análise completa do código
-        id: run-code-analyzer
-        uses: forcedotcom/run-code-analyzer@v1
-        with:
-          run-command: run
-          run-arguments: --normalize-severity --severity-threshold 1 --category "Best Practices,Code Style,Design,Security,Error Prone,Performance" --target "./deploy" --outfile SalesforceCodeAnalyzerResults.json
-          results-artifact-name: salesforce-code-analyzer-results
-
-      - name: Validar resultado da análise de código
-        if: |
-          steps.run-code-analyzer.outputs.exit-code > 0 ||
-          steps.run-code-analyzer.outputs.num-sev1-violations > 0 
-        run:  | 
-          echo "------------------------------------"
-          echo "------PMD CODE ANALYSIS FAILED------"
-          echo "------------------------------------"
-          exit 1
-
-      - name: Listar conteúdo do diretório deploy
-        run: ls -R deploy
-
-      - name: Exibir conteúdo do package.xml
-        run: cat deploy/package/package.xml
-
-      - name: Convertendo Metadados do package
+      - name: Determine Test Command
+        id: test-command
         run: |
-          sfdx force:source:convert --manifest=deploy/package/package.xml --outputdir=convert
+          RUN_JOB="${{ steps.check_package.outputs.run_job }}"
+          if [[ "$GITHUB_EVENT_LABEL_NAME" == "RUN_TESTS" && $RUN_JOB == 'true' ]]; then
+            echo "cmd=validate_v2" >> $GITHUB_OUTPUT
+          elif [[ "$GITHUB_EVENT_LABEL_NAME" == "NOT_RUN_TESTS" && $RUN_JOB == 'true' ]]; then
+            echo "cmd=validate_without_tests" >> $GITHUB_OUTPUT
+          else
+            echo "cmd=skip" >> $GITHUB_OUTPUT
+          fi
 
-      - name: Rodar deploy dry-run do Vlocity para validar deploy real
+      - name: Run Validation
+        if: steps.test-command.outputs.cmd != 'skip'
+        id: validation
         run: |
-          set -e
-          vlocity -job vlocity/job.json packDeploy --dry-run || (echo "Erro no dry-run do Vlocity packDeploy" && exit 1)
+          make ${{ steps.test-command.outputs.cmd }} org_name=salesforceOrg
+          
 
-      - name: Executar Deploy e Testes Salesforce (dry-run)
+      - name: Init Validate Vlocity
+        if: steps.check_vlocity.outputs.run_vlocity == 'true'
         run: |
-          set -e
-          echo "Executando deploy Salesforce com dry-run."
-          sf project deploy start --manifest deploy/package/package.xml --dry-run --test-level RunLocalTests --target-org prd | tee deploy/deploy_output.log
+             make vlocity_validate org_name=salesforceOrg
 
-      - name: Definir nome do artefato com org, data e hora
-        id: set-artifact-name
+
+      - name: Validate response from Validation
+        id: result
         run: |
-          ORG_NAME="PRD"
-          export TZ="America/Sao_Paulo"
-          TIMESTAMP=$(date +'%d-%m-%Y--%H-%M-%S')
-          echo "PACKAGE_XML_ARTIFACT=${ORG_NAME}_Package_xml_${TIMESTAMP}" >> $GITHUB_OUTPUT
-          echo "DEPLOY_LOG_ARTIFACT=${ORG_NAME}_Validade_log_${TIMESTAMP}" >> $GITHUB_OUTPUT
+           if [[ "${{ steps.check_package.outputs.run_job }}" == 'true' ]]; then
+           echo "status=${{ steps.validation.outcome }}" >> $GITHUB_OUTPUT
+           elif [[ "${{ steps.check_vlocity.outputs.run_vlocity }}" == 'true' ]]; then
+           echo "status=success" >> $GITHUB_OUTPUT
+           else
+           echo "status=skipped" >> $GITHUB_OUTPUT
+           fi
 
-      - name: Salvar package.xml
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.set-artifact-name.outputs.PACKAGE_XML_ARTIFACT }}
-          path: deploy/package/package.xml
-
-      - name: Salvar o Log de Deploy
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.set-artifact-name.outputs.DEPLOY_LOG_ARTIFACT }}
-          path: deploy/deploy_output.log
+    outputs:
+      status: ${{ steps.result.outputs.status }}
