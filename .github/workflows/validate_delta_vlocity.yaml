@@ -3,7 +3,6 @@ name: Validate pull request
 on:
   pull_request:
     branches: [ dev, qa, uat, staging, hotfix, main ]
-    types: [ labeled ]
 
 env:
   SF_DISABLE_DNS_CHECK: true
@@ -22,12 +21,10 @@ jobs:
       security-events: write
       actions: read
       contents: read
-    if: |
-      github.actor != 'dependabot[bot]' &&
-      (github.event.label.name == 'RUN_TESTS' || github.event.label.name == 'NOT_RUN_TESTS')
+    if: github.actor != 'dependabot[bot]'
     env:
       BRANCH_REF: ${{ github.base_ref }}
-      GITHUB_EVENT_LABEL_NAME: ${{ github.event.label.name }}
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -87,9 +84,9 @@ jobs:
           echo "Destination Branch: $BRANCH_REF"
           echo n | sf sgd:source:delta --to "HEAD" --from $(git merge-base HEAD origin/$BRANCH_REF) --output . -i .ciignore
           echo "--- package.xml generated with added and modified metadata ---"
-          cat package/package.xml
+          cat package/package.xml || echo "package.xml not found"
           echo "--- destructiveChanges.xml generated with deleted metadata ---"
-          cat destructiveChanges/destructiveChanges.xml
+          cat destructiveChanges/destructiveChanges.xml || echo "destructiveChanges.xml not found"
 
       - name: Check package
         id: check_package
@@ -99,7 +96,6 @@ jobs:
           else
             echo "run_job=false" >> $GITHUB_OUTPUT
           fi
-          echo "check_labels=false" >> $GITHUB_OUTPUT
 
       - name: Generate Vlocity Delta
         run: |
@@ -117,7 +113,6 @@ jobs:
           echo "📝 Manifesto manifest.yaml criado com:"
           cat vlocity/manifest.yaml
 
-
       - name: Check Vlocity changes
         id: check_vlocity
         run: |
@@ -127,41 +122,25 @@ jobs:
             echo "run_vlocity=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Determine Test Command
-        id: test-command
-        run: |
-          RUN_JOB="${{ steps.check_package.outputs.run_job }}"
-          if [[ "$GITHUB_EVENT_LABEL_NAME" == "RUN_TESTS" && $RUN_JOB == 'true' ]]; then
-            echo "cmd=validate_v2" >> $GITHUB_OUTPUT
-          elif [[ "$GITHUB_EVENT_LABEL_NAME" == "NOT_RUN_TESTS" && $RUN_JOB == 'true' ]]; then
-            echo "cmd=validate_without_tests" >> $GITHUB_OUTPUT
-          else
-            echo "cmd=skip" >> $GITHUB_OUTPUT
-          fi
-
       - name: Run Validation
-        if: steps.test-command.outputs.cmd != 'skip'
+        if: steps.check_package.outputs.run_job == 'true'
         id: validation
-        run: |
-          make ${{ steps.test-command.outputs.cmd }} org_name=salesforceOrg
-          
+        run: make validate_v2 org_name=salesforceOrg
 
       - name: Init Validate Vlocity
         if: steps.check_vlocity.outputs.run_vlocity == 'true'
-        run: |
-             make vlocity_validate org_name=salesforceOrg
-
+        run: make vlocity_validate org_name=salesforceOrg
 
       - name: Validate response from Validation
         id: result
         run: |
-           if [[ "${{ steps.check_package.outputs.run_job }}" == 'true' ]]; then
-           echo "status=${{ steps.validation.outcome }}" >> $GITHUB_OUTPUT
-           elif [[ "${{ steps.check_vlocity.outputs.run_vlocity }}" == 'true' ]]; then
-           echo "status=success" >> $GITHUB_OUTPUT
-           else
-           echo "status=skipped" >> $GITHUB_OUTPUT
-           fi
+          if [[ "${{ steps.check_package.outputs.run_job }}" == 'true' ]]; then
+            echo "status=${{ steps.validation.outcome }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ steps.check_vlocity.outputs.run_vlocity }}" == 'true' ]]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            echo "status=skipped" >> $GITHUB_OUTPUT
+          fi
 
     outputs:
       status: ${{ steps.result.outputs.status }}
