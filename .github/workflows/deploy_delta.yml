@@ -48,6 +48,24 @@ jobs:
           mkdir -p deploy
           sf sgd source delta --from origin/master --to HEAD --output-dir deploy
 
+      - name: Rodar análise completa do código
+        id: run-code-analyzer
+        uses: forcedotcom/run-code-analyzer@v1
+        with:
+          run-command: run
+          run-arguments: --normalize-severity --severity-threshold 1 --category "Best Practices,Code Style,Design,Security,Error Prone,Performance" --target "./deploy" --outfile SalesforceCodeAnalyzerResults.json
+          results-artifact-name: salesforce-code-analyzer-results
+
+      - name: Validar resultado da análise de código
+        if: |
+          steps.run-code-analyzer.outputs.exit-code > 0 ||
+          steps.run-code-analyzer.outputs.num-sev1-violations > 0 
+        run: | 
+          echo "------------------------------------"
+          echo "------PMD CODE ANALYSIS FAILED------"
+          echo "------------------------------------"
+          exit 1
+
       - name: Exibir package.xml gerado
         run: cat deploy/package/package.xml || echo "Nenhum metadata detectado"
 
@@ -62,7 +80,7 @@ jobs:
             --coverage-formatters clover \
             | tee deploy/deploy_output.log
 
-      - name: Gerar artefato de deploy
+      - name: Gerar nome dos artefatos
         id: set-artifact-name
         run: |
           ORG_NAME="PRD"
