@@ -1,90 +1,146 @@
-name: Deploy das alterações para PRD
+name: Deploy code to Org
+
 on:
-  pull_request:
-    types: [closed]
-    branches:
-      - master
-    paths:
-      - 'force-app/**'
-      - 'vlocity/**'
+  push:
+    branches: [ dev, qa, uat, staging, hotfix, main ]
+
+env:
+  SF_DISABLE_DNS_CHECK: true
+  SF_DISABLE_SOURCE_MEMBER_POLLING: true
+  SF_DNS_TIMEOUT: 120
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
-  merge_deploy:
-    if: github.event.pull_request.merged == true
+  deploy:
+    name: Deploy
     runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment:
+      name: ${{ github.head_ref }}
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+
     steps:
-      - name: Checkout do repositório
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 
+          fetch-depth: 0
 
-      - name: Instalar dependências do sistema, Salesforce CLI e Vlocity CLI
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y wget curl jq
-          npm install @salesforce/cli --global
-          npm install -g vlocity
-
-      - name: Autenticar com a org PRD
-        run: |
-          echo "${{ secrets.AUTH_URL_PRD }}" > sfdx-auth-url.txt
-          sf org login sfdx-url -f sfdx-auth-url.txt --alias prd
-
-      - name: Instalar plugin sfdx-git-delta
-        run: echo "y" | sf plugins install sfdx-git-delta
-
-      - name: Criar diretório de saída para o pacote delta
-        run: mkdir -p deploy
-
-      - name: Gerar pacote delta no diretório deploy
-        run: |
-          sf sgd source delta --from HEAD^ --to HEAD --output-dir deploy
-
-      - name: Definir nome do artefato com org, data e hora
-        id: set-artifact-name
-        run: |
-          ORG_NAME="PRD"
-          export TZ="America/Sao_Paulo"
-          TIMESTAMP=$(date +'%d-%m-%Y--%H-%M-%S')
-          echo "PACKAGE_XML_ARTIFACT=${ORG_NAME}_Package_xml_${TIMESTAMP}" >> $GITHUB_OUTPUT
-          echo "DEPLOY_SFCLI_LOG_ARTIFACT=${ORG_NAME}_Deploy_SFCLI_log_${TIMESTAMP}" >> $GITHUB_OUTPUT
-          echo "DEPLOY_VLOCITY_LOG_ARTIFACT=${ORG_NAME}_Deploy_Vlocity_log_${TIMESTAMP}" >> $GITHUB_OUTPUT
-
-      - name: Listar conteúdo do diretório deploy
-        run: ls -R deploy
-        
-      - name: Exibir conteúdo do package.xml
-        run: cat deploy/package/package.xml
-        
-      - name: Converter metadados para deploy
-        run: sfdx force:source:convert --manifest=deploy/package/package.xml --outputdir=convert
-
-      - name: Executar deploy real com Salesforce CLI e testes
-        run: |
-          set -e
-          echo "🚀 Deploy Salesforce CLI com testes rodando full power"
-          sf project deploy start --manifest deploy/package/package.xml --test-level RunLocalTests --target-org prd | tee deploy/deploy_sfcli.log
-
-      - name: Executar deploy real com Vlocity CLI
-        run: |
-          set -e
-          echo "🚀 Deploy Vlocity CLI rodando full power"
-          vlocity -job vlocity/job.json packDeploy | tee deploy/deploy_vlocity.log
-
-      - name: Salvar package.xml
-        uses: actions/upload-artifact@v4
+      - name: Setup nodeJS
+        if: github.actor != 'dependabot[bot]'
+        uses: actions/setup-node@v4
         with:
-          name: ${{ steps.set-artifact-name.outputs.PACKAGE_XML_ARTIFACT }}
-          path: deploy/package/package.xml
+          node-version: '18'
+          check-latest: true
 
-      - name: Salvar logs do deploy Salesforce CLI
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.set-artifact-name.outputs.DEPLOY_SFCLI_LOG_ARTIFACT }}
-          path: deploy/deploy_sfcli.log
+      - name: Install SFDX CLI
+        run: npm install @salesforce/cli -g
 
-      - name: Salvar logs do deploy Vlocity CLI
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.set-artifact-name.outputs.DEPLOY_VLOCITY_LOG_ARTIFACT }}
-          path: deploy/deploy_vlocity.log
+      - name: Install the SFDX Git Delta
+        run: echo 'y' | sf plugins install sfdx-git-delta
+
+      - name: Install Vlocity Build Tool
+        run: npm install -g vlocity
+
+      - name: Set ENV Auth URL Org
+        id: set-env-org
+        run: |
+          BRANCH="${GITHUB_REF##*/}"
+          declare -A URL_MAP=(
+            [dev]="${{ secrets.DEV_AUTH_URL }}"
+            [qa]="${{ secrets.QA_AUTH_URL }}"
+            [uat]="${{ secrets.UAT_AUTH_URL }}"
+            [staging]="${{ secrets.STAGING_AUTH_URL }}"
+            [hotfix]="${{ secrets.HOTFIX_AUTH_URL }}"
+            [main]="${{ secrets.PROD_AUTH_URL }}"
+          )
+          echo "env=${URL_MAP[$BRANCH]:-unknown}" >> $GITHUB_OUTPUT
+
+      - name: Set ENV Auth User Org
+        id: set-env-user
+        run: |
+          BRANCH="${GITHUB_REF##*/}"
+          declare -A USER_MAP=(
+            [dev]="${{ secrets.DEV_AUTH_USER }}"
+            [qa]="${{ secrets.QA_AUTH_USER }}"
+            [uat]="${{ secrets.UAT_AUTH_USER }}"
+            [staging]="${{ secrets.STAGING_AUTH_USER }}"
+            [hotfix]="${{ secrets.HOTFIX_AUTH_USER }}"
+            [main]="${{ secrets.PROD_AUTH_USER }}"
+          )
+          echo "env=${USER_MAP[$BRANCH]:-unknown}" >> $GITHUB_OUTPUT
+
+      - name: Authenticate Org
+        run: |
+          echo ${{ steps.set-env-org.outputs.env }} > ./AUTH_URL.txt
+          echo y | sf org login sfdx-url -f ./AUTH_URL.txt -a salesforceOrg -d
+          sf config set target-org=${{ steps.set-env-user.outputs.env }}
+          sf config set org-api-version=63.0 --global
+
+      - name: Generate package.xml
+        run: |
+          git fetch origin
+          PREVIOUS_COMMIT=$(git rev-parse HEAD^)
+          echo n | sf sgd:source:delta \
+            --to "HEAD" \
+            --from "$PREVIOUS_COMMIT" \
+            --output-dir . \
+            -i .ciignore
+          cat package/package.xml || echo "package.xml not found"
+          cat destructiveChanges/destructiveChanges.xml || echo "destructiveChanges.xml not found"
+
+      - name: Check package
+        id: check_package
+        run: |
+          if grep -q '<types>' ./package/package.xml ; then
+            echo "run_job=true" >> $GITHUB_OUTPUT
+          else
+            echo "run_job=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate Vlocity Delta and Check Changes
+        id: check_vlocity
+        run: |
+          mkdir -p vlocity
+          PREVIOUS_COMMIT=$(git rev-parse HEAD^)
+          git diff --name-only $PREVIOUS_COMMIT HEAD | grep '^vlocity/' > vlocity/changedFiles.txt || true
+
+          if [ -s vlocity/changedFiles.txt ]; then
+            echo "run_vlocity=true" >> $GITHUB_OUTPUT
+            echo "projectPath: ." > vlocity/manifest.yaml
+            echo "expansionPath: vlocity" >> vlocity/manifest.yaml
+            echo "manifest:" >> vlocity/manifest.yaml
+            cut -d'/' -f2-3 vlocity/changedFiles.txt | sed 's/\.json$//' | sort -u | while read -r pack; do
+              echo "  - $pack" >> vlocity/manifest.yaml
+            done
+            cat vlocity/manifest.yaml
+          else
+            echo "run_vlocity=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Init Deploy Metadata
+        if: steps.check_package.outputs.run_job == 'true'
+        id: deploy_metadata
+        run: make deploy_v2 org_name=salesforceOrg
+
+      - name: Init Deploy Vlocity
+        if: steps.check_vlocity.outputs.run_vlocity == 'true'
+        run: make vlocity_deploy org_name=salesforceOrg
+
+      - name: Final status
+        id: result
+        run: |
+          if [[ "${{ steps.check_package.outputs.run_job }}" == 'true' ]]; then
+            echo "status=${{ steps.deploy_metadata.outcome }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ steps.check_vlocity.outputs.run_vlocity }}" == 'true' ]]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            echo "status=skipped" >> $GITHUB_OUTPUT
+          fi
+
+    outputs:
+      status: ${{ steps.result.outputs.status }}
